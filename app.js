@@ -114,8 +114,9 @@ function renderHome() {
   const hero = el('div', { class: 'hero' });
 
   hero.innerHTML = `
-    <h1>Your path to <span>Bioinformatics</span></h1>
-    <p class="hero-sub">One concept at a time. Biology is just connected chemistry — and once you see the pattern, it clicks. Short, real, no fluff. Built for your brain.</p>
+    <div class="hero-kicker">BIOLOGY <span>×</span> CHEMISTRY</div>
+    <h1>Your path to <span>Biochemistry</span></h1>
+    <p class="hero-sub">One concept at a time. Biology is just connected chemistry — and once you see where they collide, it clicks. Short, real, no fluff. Built for your brain.</p>
     <div class="path-cards" id="pathCards"></div>
     <div style="margin-bottom:16px">
       <div class="detail-label">Your progress</div>
@@ -124,16 +125,19 @@ function renderHome() {
       </div>
       <div style="font-size:13px;color:var(--text-muted)">${learned} of ${total} concepts marked as learned</div>
     </div>
-    <div style="padding:20px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;max-width:600px">
-      <div class="detail-label">The Bioinformatics Path</div>
+    <div class="roadmap-card">
+      <div class="detail-label">The Biochemistry Path</div>
       <div style="font-size:13px;color:var(--text-muted);line-height:1.8">
         <strong style="color:var(--text)">1. Chemistry Foundations</strong> → Atoms, bonds, molecules, pH<br>
-        <strong style="color:var(--text)">2. Cell Biology</strong> → Cells, membranes, organelles, energy<br>
-        <strong style="color:var(--text)">3. DNA &amp; RNA</strong> → Structure, replication, transcription<br>
-        <strong style="color:var(--text)">4. Proteins</strong> → Amino acids, folding, enzymes<br>
-        <strong style="color:var(--text)">5. Genetics</strong> → Genes, inheritance, mutations<br>
-        <strong style="color:var(--text)">6. Molecular Biology</strong> → PCR, CRISPR, sequencing<br>
-        <strong style="color:var(--text)">7. Quick Reference</strong> → Glossary, amino acids, key terms
+        <strong style="color:var(--text)">2. General &amp; Physical Chemistry</strong> → Thermodynamics, equilibrium, redox<br>
+        <strong style="color:var(--text)">3. Organic Chemistry</strong> → Hydrocarbons, isomers, functional groups<br>
+        <strong style="color:var(--text)">4. Cell Biology</strong> → Cells, membranes, organelles, energy<br>
+        <strong style="color:var(--text)">5. DNA &amp; RNA</strong> → Structure, replication, transcription<br>
+        <strong style="color:var(--text)">6. Proteins</strong> → Amino acids, folding, enzymes<br>
+        <strong style="color:var(--text)">7. Genetics</strong> → Genes, inheritance, mutations<br>
+        <strong style="color:var(--text)">8. Molecular Biology</strong> → PCR, CRISPR, sequencing<br>
+        <strong style="color:var(--accent2)">9. Where Chemistry Meets Biology</strong> → The crossover points, explained<br>
+        <strong style="color:var(--text)">10. Quick Reference</strong> → Glossary, amino acids, key terms
       </div>
     </div>
   `;
@@ -389,6 +393,8 @@ function el(tag, attrs = {}, text = '') {
 function tagLabel(tag) {
   return {
     chem: 'Chem',
+    org:  'Organic',
+    bridge: 'Bio × Chem',
     cell: 'Cell Bio',
     dna:  'DNA/RNA',
     prot: 'Protein',
