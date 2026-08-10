@@ -14,6 +14,18 @@ const searchInput = document.getElementById('search');
 const progressPill = document.getElementById('progressPill');
 const menuBtn = document.getElementById('menuBtn');
 
+// ── Connections map state ─────────────────────────────────────────────────
+let graphNodes = null;
+let graphEdges = null;
+let graphNodeById = null;
+let graphSelected = null;
+let graphSelectedNeighbors = new Set();
+let graphHiddenTags = new Set();
+let graphSearchMatch = null;
+let graphRafId = null;
+let graphResizeObserver = null;
+let graphWindowHandlers = null;
+
 // ── Init ───────────────────────────────────────────────────────────────────
 function init() {
   buildSidebar();
@@ -56,9 +68,21 @@ function buildSidebar() {
     setSidebarActive('home');
     sidebarEl.classList.remove('open');
   });
+
+  const connLink = el('div', { class: 'sidebar-item' }, '🕸️ Connections');
+  connLink.dataset.section = 'connections';
+  connLink.addEventListener('click', () => {
+    currentSection = 'connections';
+    searchInput.value = '';
+    renderConnections();
+    setSidebarActive('connections');
+    sidebarEl.classList.remove('open');
+  });
+
   const homeSection = el('div', { class: 'sidebar-section open' });
   const homeItems = el('div', { class: 'sidebar-items' });
   homeItems.appendChild(homeLink);
+  homeItems.appendChild(connLink);
   homeSection.appendChild(homeItems);
   sidebarEl.appendChild(homeSection);
 
@@ -107,6 +131,7 @@ function setSidebarActive(sectionId) {
 
 // ── Home ───────────────────────────────────────────────────────────────────
 function renderHome() {
+  stopGraphLoop();
   const total = ALL_CONCEPTS.length;
   const learned = learnedIds.size;
 
@@ -117,6 +142,9 @@ function renderHome() {
     <div class="hero-kicker">BIOLOGY <span>×</span> CHEMISTRY</div>
     <h1>Your path to <span>Biochemistry</span></h1>
     <p class="hero-sub">One concept at a time. Biology is just connected chemistry — and once you see where they collide, it clicks. Short, real, no fluff. Built for your brain.</p>
+    <div class="hero-cta-row">
+      <button class="hero-connections-btn" id="heroConnBtn">🕸️ See how it all connects →</button>
+    </div>
     <div class="path-cards" id="pathCards"></div>
     <div style="margin-bottom:16px">
       <div class="detail-label">Your progress</div>
@@ -141,6 +169,12 @@ function renderHome() {
       </div>
     </div>
   `;
+
+  hero.querySelector('#heroConnBtn').addEventListener('click', () => {
+    currentSection = 'connections';
+    renderConnections();
+    setSidebarActive('connections');
+  });
 
   const cards = hero.querySelector('#pathCards');
   SECTIONS.forEach(section => {
@@ -171,6 +205,7 @@ function renderHome() {
 
 // ── Section View ───────────────────────────────────────────────────────────
 function renderSection(sectionId, scrollToId = null) {
+  stopGraphLoop();
   const section = SECTIONS.find(s => s.id === sectionId);
   if (!section) return;
 
@@ -215,6 +250,7 @@ function renderSection(sectionId, scrollToId = null) {
 
 // ── Search ─────────────────────────────────────────────────────────────────
 function renderSearch(query) {
+  stopGraphLoop();
   const q = query.toLowerCase();
   const results = ALL_CONCEPTS.filter(c =>
     c.title.toLowerCase().includes(q) ||
@@ -402,6 +438,378 @@ function tagLabel(tag) {
     mol:  'Mol Bio',
     ref:  'Ref'
   }[tag] || tag;
+}
+
+// ── Connections Map ────────────────────────────────────────────────────────
+// Cross-references are detected automatically by scanning each concept's own
+// text for other concepts' titles — a title only counts as a match if it's
+// multi-word, or a short all-caps/long acronym (PCR, DNA, CRISPR-Cas9). Single
+// common words are excluded so ordinary language doesn't produce false links.
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function conceptMatchPhrase(title) {
+  return title.split(/[—:]/)[0].trim();
+}
+
+function isSafeMatchPhrase(phrase) {
+  const words = phrase.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return true;
+  const w = words[0] || '';
+  return (w.length >= 3 && w === w.toUpperCase()) || w.length >= 6;
+}
+
+function tagColor(tag) {
+  return {
+    chem: '#ffa657', org: '#2dd4bf', bridge: '#e6ff3c', cell: '#7ee787',
+    dna: '#79c0ff', prot: '#d2a8ff', gene: '#ffa198', mol: '#67e8f9', ref: '#c9d1d9'
+  }[tag] || '#eafbea';
+}
+
+function buildGraphData() {
+  if (graphNodes) return;
+
+  const stripHtml = s => (s || '').replace(/<[^>]+>/g, ' ');
+  const textOf = c => (stripHtml(c.blurb) + ' ' + stripHtml(c.detail)).toLowerCase();
+
+  const nodes = ALL_CONCEPTS.map(c => ({
+    id: c.id,
+    title: c.title,
+    sectionId: c.sectionId,
+    sectionTitle: c.sectionTitle,
+    tag: c.tags[0],
+    blurb: c.blurb,
+    text: textOf(c),
+    x: (Math.random() - 0.5) * 900,
+    y: (Math.random() - 0.5) * 900,
+    vx: 0, vy: 0,
+    pinned: false,
+    degree: 0
+  }));
+  const byId = new Map(nodes.map(n => [n.id, n]));
+
+  const matchTargets = nodes
+    .map(n => ({ id: n.id, phrase: conceptMatchPhrase(n.title) }))
+    .filter(m => isSafeMatchPhrase(m.phrase))
+    .map(m => ({ id: m.id, re: new RegExp('\\b' + escapeRegExp(m.phrase.toLowerCase()) + '\\b') }));
+
+  const edgeMap = new Map();
+  nodes.forEach(a => {
+    matchTargets.forEach(m => {
+      if (m.id === a.id) return;
+      if (m.re.test(a.text)) {
+        const key = [a.id, m.id].sort().join('|');
+        edgeMap.set(key, (edgeMap.get(key) || 0) + 1);
+      }
+    });
+  });
+
+  const edges = [...edgeMap.entries()].map(([key, weight]) => {
+    const [a, b] = key.split('|');
+    byId.get(a).degree++;
+    byId.get(b).degree++;
+    return { a, b, weight, cross: byId.get(a).tag !== byId.get(b).tag };
+  });
+
+  nodes.forEach(n => { delete n.text; });
+
+  graphNodes = nodes;
+  graphEdges = edges;
+  graphNodeById = byId;
+}
+
+function stopGraphLoop() {
+  if (graphRafId) { cancelAnimationFrame(graphRafId); graphRafId = null; }
+  if (graphResizeObserver) { graphResizeObserver.disconnect(); graphResizeObserver = null; }
+  if (graphWindowHandlers) {
+    window.removeEventListener('pointermove', graphWindowHandlers.move);
+    window.removeEventListener('pointerup', graphWindowHandlers.up);
+    graphWindowHandlers = null;
+  }
+}
+
+function renderConnections() {
+  buildGraphData();
+  stopGraphLoop();
+  searchInput.value = '';
+
+  mainEl.innerHTML = '';
+  const view = el('div', { class: 'connections-view' });
+
+  const crossCount = graphEdges.filter(e => e.cross).length;
+
+  view.innerHTML = `
+    <div class="section-view-header">
+      <span class="section-view-icon">🕸️</span>
+      <h2>How It All Connects</h2>
+    </div>
+    <p class="section-view-meta">
+      ${graphNodes.length} concepts, ${graphEdges.length} connections found automatically by scanning each
+      concept's own text for mentions of other concepts — ${crossCount} of them cross between different
+      fields (the brighter lines). Drag nodes around, click one to see what it links to, or search below.
+    </p>
+    <div class="graph-toolbar">
+      <input type="search" id="graphSearch" class="graph-search" placeholder="Find a concept in the map...">
+      <div class="graph-legend" id="graphLegend"></div>
+    </div>
+    <div class="graph-wrap">
+      <canvas id="graphCanvas"></canvas>
+      <div class="graph-info" id="graphInfo">
+        <div class="graph-info-empty">Click any node to see how it connects to the rest of the map. Cross-discipline links (a different color meeting a different color) are outlined in green in the list.</div>
+      </div>
+    </div>
+  `;
+  mainEl.appendChild(view);
+
+  graphSelected = null;
+  graphSelectedNeighbors = new Set();
+  graphHiddenTags = new Set();
+  graphSearchMatch = null;
+
+  const legend = view.querySelector('#graphLegend');
+  const tagsPresent = [...new Set(graphNodes.map(n => n.tag))];
+  tagsPresent.forEach(t => {
+    const item = el('span', { class: 'graph-legend-item tag tag-' + t }, tagLabel(t));
+    item.dataset.tag = t;
+    item.addEventListener('click', () => {
+      item.classList.toggle('off');
+      graphHiddenTags = new Set(
+        [...legend.querySelectorAll('.graph-legend-item.off')].map(i => i.dataset.tag)
+      );
+    });
+    legend.appendChild(item);
+  });
+
+  view.querySelector('#graphSearch').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    graphSearchMatch = q.length > 1
+      ? new Set(graphNodes.filter(n => n.title.toLowerCase().includes(q)).map(n => n.id))
+      : null;
+  });
+
+  initGraphCanvas(view);
+}
+
+function nodeRadius(n) {
+  return 5 + Math.min(n.degree, 10) * 1.1;
+}
+
+function showGraphInfo(n, infoEl) {
+  const neighborIds = graphEdges
+    .filter(e => e.a === n.id || e.b === n.id)
+    .map(e => (e.a === n.id ? e.b : e.a));
+  graphSelectedNeighbors = new Set(neighborIds);
+
+  const neighbors = neighborIds
+    .map(id => graphNodeById.get(id))
+    .sort((x, y) => (x.tag === n.tag ? 1 : 0) - (y.tag === n.tag ? 1 : 0));
+
+  infoEl.innerHTML = `
+    <div class="graph-info-title">
+      <span class="tag tag-${n.tag}">${tagLabel(n.tag)}</span>
+      ${n.title}
+    </div>
+    <div class="graph-info-blurb">${n.blurb}</div>
+    <button class="graph-info-open" data-id="${n.id}">Open concept card →</button>
+    <div class="graph-info-label">${neighbors.length ? `Connects to ${neighbors.length}` : 'No detected connections yet'}</div>
+    <div class="graph-info-links">
+      ${neighbors.map(nb => `<div class="graph-info-link${nb.tag !== n.tag ? ' cross' : ''}" data-id="${nb.id}">
+        <span class="tag tag-${nb.tag}">${tagLabel(nb.tag)}</span> ${nb.title}
+      </div>`).join('')}
+    </div>
+  `;
+
+  infoEl.querySelector('.graph-info-open').addEventListener('click', () => openGraphNode(n));
+  infoEl.querySelectorAll('.graph-info-link').forEach(linkEl => {
+    linkEl.addEventListener('click', () => {
+      const target = graphNodeById.get(linkEl.dataset.id);
+      graphSelected = target.id;
+      showGraphInfo(target, infoEl);
+    });
+  });
+}
+
+function openGraphNode(n) {
+  stopGraphLoop();
+  currentSection = n.sectionId;
+  renderSection(n.sectionId, n.id);
+  setSidebarActive(n.sectionId);
+}
+
+function initGraphCanvas(view) {
+  const canvas = view.querySelector('#graphCanvas');
+  const infoEl = view.querySelector('#graphInfo');
+  const ctx = canvas.getContext('2d');
+
+  let width, height, panX, panY;
+  function resize() {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    width = canvas.width = rect.width;
+    height = canvas.height = rect.height;
+    if (panX === undefined) { panX = width / 2; panY = height / 2; }
+  }
+  resize();
+
+  let dragNode = null;
+  let hoverNode = null;
+  let panDrag = null;
+
+  const toScreen = n => ({ x: n.x + panX, y: n.y + panY });
+
+  function nodeAt(mx, my) {
+    let found = null;
+    for (const n of graphNodes) {
+      if (graphHiddenTags.has(n.tag)) continue;
+      const p = toScreen(n);
+      const r = nodeRadius(n) + 4;
+      const dx = mx - p.x, dy = my - p.y;
+      if (dx * dx + dy * dy <= r * r) found = n;
+    }
+    return found;
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const n = nodeAt(mx, my);
+    if (n) { dragNode = n; n.pinned = true; }
+    else { panDrag = { x: e.clientX, y: e.clientY, panX, panY }; }
+  });
+
+  const onMove = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if (dragNode) {
+      dragNode.x = mx - panX;
+      dragNode.y = my - panY;
+      dragNode.vx = 0; dragNode.vy = 0;
+    } else if (panDrag) {
+      panX = panDrag.panX + (e.clientX - panDrag.x);
+      panY = panDrag.panY + (e.clientY - panDrag.y);
+    } else if (mx >= 0 && mx <= width && my >= 0 && my <= height) {
+      hoverNode = nodeAt(mx, my);
+      canvas.style.cursor = hoverNode ? 'pointer' : 'grab';
+    }
+  };
+  const onUp = () => { dragNode = null; panDrag = null; };
+
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  graphWindowHandlers = { move: onMove, up: onUp };
+
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const n = nodeAt(mx, my);
+    if (n) {
+      graphSelected = n.id;
+      showGraphInfo(n, infoEl);
+    }
+  });
+
+  canvas.addEventListener('dblclick', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const n = nodeAt(mx, my);
+    if (n) openGraphNode(n);
+  });
+
+  graphResizeObserver = new ResizeObserver(resize);
+  graphResizeObserver.observe(canvas.parentElement);
+
+  const fontStack = getComputedStyle(document.documentElement).getPropertyValue('--font').trim();
+  const REPEL = 2600, SPRING = 0.012, SPRING_LEN = 70, CENTER = 0.0025, DAMPING = 0.86;
+
+  function step() {
+    for (let i = 0; i < graphNodes.length; i++) {
+      const a = graphNodes[i];
+      if (a.pinned) continue;
+      let fx = -a.x * CENTER, fy = -a.y * CENTER;
+      for (let j = 0; j < graphNodes.length; j++) {
+        if (i === j) continue;
+        const b = graphNodes[j];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const d2 = dx * dx + dy * dy || 0.01;
+        const d = Math.sqrt(d2);
+        const f = REPEL / d2;
+        fx += (dx / d) * f;
+        fy += (dy / d) * f;
+      }
+      a.vx = (a.vx + fx) * DAMPING;
+      a.vy = (a.vy + fy) * DAMPING;
+    }
+
+    graphEdges.forEach(e => {
+      const a = graphNodeById.get(e.a), b = graphNodeById.get(e.b);
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const diff = (d - SPRING_LEN) * SPRING;
+      const fx = (dx / d) * diff, fy = (dy / d) * diff;
+      if (!a.pinned) { a.vx += fx; a.vy += fy; }
+      if (!b.pinned) { b.vx -= fx; b.vy -= fy; }
+    });
+
+    graphNodes.forEach(n => {
+      if (!n.pinned) { n.x += n.vx; n.y += n.vy; }
+    });
+
+    draw();
+    graphRafId = requestAnimationFrame(step);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+
+    graphEdges.forEach(e => {
+      const a = graphNodeById.get(e.a), b = graphNodeById.get(e.b);
+      if (graphHiddenTags.has(a.tag) || graphHiddenTags.has(b.tag)) return;
+      const pa = toScreen(a), pb = toScreen(b);
+      const isSelectedEdge = graphSelected && (e.a === graphSelected || e.b === graphSelected);
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      if (graphSelected) {
+        ctx.strokeStyle = isSelectedEdge ? (e.cross ? '#39ff6a' : 'rgba(234,251,234,.4)') : 'rgba(234,251,234,.03)';
+        ctx.lineWidth = isSelectedEdge ? 1.6 : 1;
+      } else {
+        ctx.strokeStyle = e.cross ? 'rgba(57,255,106,.4)' : 'rgba(234,251,234,.08)';
+        ctx.lineWidth = e.cross ? 1.3 : 1;
+      }
+      ctx.stroke();
+    });
+
+    graphNodes.forEach(n => {
+      if (graphHiddenTags.has(n.tag)) return;
+      const p = toScreen(n);
+      const r = nodeRadius(n);
+      const dimmed = graphSelected && graphSelected !== n.id && !graphSelectedNeighbors.has(n.id);
+      const isMatch = !graphSearchMatch || graphSearchMatch.has(n.id);
+
+      ctx.globalAlpha = dimmed || !isMatch ? 0.18 : 1;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = tagColor(n.tag);
+      ctx.fill();
+      if (n.id === graphSelected || n.id === (hoverNode && hoverNode.id)) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#eafbea';
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      const showLabel = n.id === graphSelected || (hoverNode && hoverNode.id === n.id) ||
+        n.degree >= 6 || (graphSearchMatch && graphSearchMatch.has(n.id));
+      if (showLabel) {
+        ctx.font = '11px ' + fontStack;
+        ctx.fillStyle = dimmed ? 'rgba(234,251,234,.25)' : '#eafbea';
+        ctx.textAlign = 'center';
+        ctx.fillText(n.title, p.x, p.y - r - 6);
+      }
+    });
+  }
+
+  graphRafId = requestAnimationFrame(step);
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
