@@ -29,7 +29,13 @@ let graphWindowHandlers = null;
 // ── Init ───────────────────────────────────────────────────────────────────
 function init() {
   buildSidebar();
-  renderHome();
+  if (location.hash === '#today') {
+    currentSection = 'today';
+    renderToday();
+    setSidebarActive('today');
+  } else {
+    renderHome();
+  }
   updateProgressPill();
 
   searchInput.addEventListener('input', (e) => {
@@ -69,6 +75,17 @@ function buildSidebar() {
     sidebarEl.classList.remove('open');
   });
 
+  const todayLink = el('div', { class: 'sidebar-item' }, '📅 Today');
+  todayLink.dataset.section = 'today';
+  todayLink.addEventListener('click', () => {
+    currentSection = 'today';
+    searchInput.value = '';
+    location.hash = 'today';
+    renderToday();
+    setSidebarActive('today');
+    sidebarEl.classList.remove('open');
+  });
+
   const connLink = el('div', { class: 'sidebar-item' }, '🕸️ Connections');
   connLink.dataset.section = 'connections';
   connLink.addEventListener('click', () => {
@@ -82,6 +99,7 @@ function buildSidebar() {
   const homeSection = el('div', { class: 'sidebar-section open' });
   const homeItems = el('div', { class: 'sidebar-items' });
   homeItems.appendChild(homeLink);
+  homeItems.appendChild(todayLink);
   homeItems.appendChild(connLink);
   homeSection.appendChild(homeItems);
   sidebarEl.appendChild(homeSection);
@@ -143,6 +161,7 @@ function renderHome() {
     <h1>Your path to <span>Biochemistry</span></h1>
     <p class="hero-sub">One concept at a time. Biology is just connected chemistry — and once you see where they collide, it clicks. Short, real, no fluff. Built for your brain.</p>
     <div class="hero-cta-row">
+      <button class="hero-connections-btn" id="heroTodayBtn">📅 Today: ${getTodayConcept().title} →</button>
       <button class="hero-connections-btn" id="heroConnBtn">🕸️ See how it all connects →</button>
     </div>
     <div class="path-cards" id="pathCards"></div>
@@ -169,6 +188,13 @@ function renderHome() {
       </div>
     </div>
   `;
+
+  hero.querySelector('#heroTodayBtn').addEventListener('click', () => {
+    currentSection = 'today';
+    location.hash = 'today';
+    renderToday();
+    setSidebarActive('today');
+  });
 
   hero.querySelector('#heroConnBtn').addEventListener('click', () => {
     currentSection = 'connections';
@@ -275,6 +301,171 @@ function renderSearch(query) {
   }
 
   mainEl.appendChild(view);
+}
+
+// ── Today (deterministic daily concept) ───────────────────────────────────
+// SHARED BLOCK — this exact logic also lives in lib/today.js (server side,
+// pinned to a fixed timezone for the push-notification sender). Keep the two
+// byte-for-byte identical; only how year/month/day get resolved should differ.
+const TODAY_EPOCH_UTC = Date.UTC(2026, 7, 10); // 2026-08-10 = day 0 = ALL_CONCEPTS[0]
+
+function conceptIndexForDate(year, month, day, n) {
+  const dateUTC = Date.UTC(year, month, day);
+  const daysSinceEpoch = Math.round((dateUTC - TODAY_EPOCH_UTC) / 86400000);
+  return ((daysSinceEpoch % n) + n) % n;
+}
+// ── end shared block ──
+
+function getTodayConcept() {
+  const now = new Date();
+  const idx = conceptIndexForDate(now.getFullYear(), now.getMonth(), now.getDate(), ALL_CONCEPTS.length);
+  return ALL_CONCEPTS[idx];
+}
+
+function seededRandom(seed) {
+  let s = seed % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return function () {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
+function todaySeed() {
+  const now = new Date();
+  return now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+}
+
+// Related concept: (1) an explicit "Concept Title" card cross-reference in the
+// content, if that convention is ever used; (2) a plain-text mention of another
+// concept's title, multi-word only (single-word titles like "Work" or "Energy"
+// are too common and produce false positives); (3) a same-section neighbor.
+function findRelatedConcept(concept) {
+  const cardRefRe = /"([^"]+)"\s+card/i;
+  const cardRefMatch = (concept.detail + ' ' + concept.blurb).match(cardRefRe);
+  if (cardRefMatch) {
+    const named = ALL_CONCEPTS.find(c => c.title.toLowerCase() === cardRefMatch[1].toLowerCase());
+    if (named) return named;
+  }
+
+  const text = (concept.blurb + ' ' + concept.detail).toLowerCase();
+  const candidates = ALL_CONCEPTS.filter(c => c.id !== concept.id);
+  for (const c of candidates) {
+    const phrase = c.title.split(/[—:]/)[0].trim();
+    if (phrase.split(/\s+/).filter(Boolean).length < 2) continue;
+    const re = new RegExp('\\b' + phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').toLowerCase() + '\\b');
+    if (re.test(text)) return c;
+  }
+
+  const section = SECTIONS.find(s => s.id === concept.sectionId);
+  if (section) {
+    const i = section.concepts.findIndex(c => c.id === concept.id);
+    const neighbor = section.concepts[i + 1] || section.concepts[i - 1];
+    if (neighbor) return { ...neighbor, sectionId: section.id, sectionTitle: section.title };
+  }
+  return null;
+}
+
+function buildDailyQuiz(concept) {
+  const rand = seededRandom(todaySeed());
+
+  const realFact = concept.facts[Math.floor(rand() * concept.facts.length)];
+
+  const others = ALL_CONCEPTS.filter(c => c.id !== concept.id && c.facts && c.facts.length);
+  for (let i = others.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [others[i], others[j]] = [others[j], others[i]];
+  }
+  const decoys = others.slice(0, 2).map(c => c.facts[Math.floor(rand() * c.facts.length)]);
+
+  const options = [
+    { text: realFact, correct: true },
+    { text: decoys[0], correct: false },
+    { text: decoys[1], correct: false }
+  ];
+  for (let i = options.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [options[i], options[j]] = [options[j], options[i]];
+  }
+
+  return { question: `Which of these is actually true about "${concept.title}"?`, options };
+}
+
+function renderToday() {
+  stopGraphLoop();
+  searchInput.value = '';
+
+  const concept = getTodayConcept();
+  const dateLabel = new Date().toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const ytUrl = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(concept.title + ' biochemistry');
+
+  mainEl.innerHTML = '';
+  const view = el('div', { class: 'section-view today-view' });
+  view.innerHTML = `
+    <div class="section-view-header">
+      <span class="section-view-icon">📅</span>
+      <h2>Today's Concept</h2>
+    </div>
+    <p class="section-view-meta">One new concept a day, walked through the curriculum in order. ${dateLabel}.</p>
+    <div id="todayCard"></div>
+  `;
+  mainEl.appendChild(view);
+
+  const card = buildConceptCard(concept, 0);
+  card.classList.add('expanded');
+  view.querySelector('#todayCard').appendChild(card);
+
+  const related = findRelatedConcept(concept);
+  const learnMore = el('div', { class: 'today-panel' });
+  learnMore.innerHTML = `
+    <div class="detail-label">Learn more</div>
+    <div class="today-links">
+      <a class="today-link" href="${ytUrl}" target="_blank" rel="noopener">▶ Watch on YouTube</a>
+      ${related ? `<span class="today-link today-link-related" data-id="${related.id}" data-section="${related.sectionId}">🔗 Related: ${related.title}</span>` : ''}
+    </div>
+  `;
+  view.appendChild(learnMore);
+  const relatedLink = learnMore.querySelector('.today-link-related');
+  if (relatedLink) {
+    relatedLink.addEventListener('click', () => {
+      currentSection = relatedLink.dataset.section;
+      renderSection(relatedLink.dataset.section, relatedLink.dataset.id);
+      setSidebarActive(relatedLink.dataset.section);
+    });
+  }
+
+  if (concept.facts && concept.facts.length) {
+    const quiz = buildDailyQuiz(concept);
+    const quizPanel = el('div', { class: 'today-panel' });
+    quizPanel.innerHTML = `
+      <div class="detail-label">Today's quiz</div>
+      <div class="quiz-question">${quiz.question}</div>
+      <div class="quiz-options" id="quizOptions"></div>
+      <div class="quiz-reveal" id="quizReveal" style="display:none"></div>
+    `;
+    view.appendChild(quizPanel);
+
+    const optsEl = quizPanel.querySelector('#quizOptions');
+    const revealEl = quizPanel.querySelector('#quizReveal');
+    quiz.options.forEach(opt => {
+      const btn = el('button', { class: 'quiz-option' }, opt.text);
+      btn.addEventListener('click', () => {
+        [...optsEl.children].forEach((b, i) => {
+          b.disabled = true;
+          if (quiz.options[i].correct) b.classList.add('correct');
+        });
+        if (!opt.correct) btn.classList.add('incorrect');
+
+        revealEl.style.display = 'block';
+        revealEl.innerHTML = `
+          <div class="detail-label">${opt.correct ? '✓ Correct' : '✗ Not quite'}</div>
+          <div class="concept-blurb">${concept.blurb}</div>
+          <a class="today-link" href="${ytUrl}" target="_blank" rel="noopener">▶ Watch on YouTube</a>
+        `;
+      });
+      optsEl.appendChild(btn);
+    });
+  }
 }
 
 // ── Concept Card ───────────────────────────────────────────────────────────
